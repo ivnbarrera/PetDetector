@@ -48,6 +48,34 @@ def get_kpts(im_processed, kpt_model):
         kpts =  np.array([])
     return kpts
 
+@app.route('/od', methods=['POST'])
+def predict_od():
+    if request.method == 'POST':
+        logging.debug('Getting OD results')
+        if 'image' not in request.files:
+            logging.debug('No image part')
+            return redirect(request.url)
+        file = request.files['image']
+        img = Image.open(file)
+        img_np = np.array(img)
+        boxes, labels = get_OD_results(img_np, det_model)
+        response = jsonify({'boxes':boxes.tolist()})
+        return response
+
+@app.route('/kpt', methods=['POST'])
+def predict_kpt():
+    if request.method == 'POST':
+        logging.debug('Getting OD results')
+        if 'image' not in request.files:
+            logging.debug('No image part')
+            return redirect(request.url)
+        file = request.files['image']
+        img = Image.open(file)
+        img_np = np.array(img)
+        kpts = get_kpts(img_np, kpt_model)
+        response = jsonify({'kpts':kpts.tolist()})
+        return response
+
 @app.route('/od_kpt', methods=['POST'])
 def predict():
     if request.method == 'POST':
@@ -72,5 +100,4 @@ def predict():
 
 
 if __name__ == '__main__':
-    from kpt_utils import ClampBatch, _resnet_split, ClampBatch, get_y, get_ip, sep_points, img2kpts
     app.run(debug=True)
