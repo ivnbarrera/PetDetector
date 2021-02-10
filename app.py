@@ -12,7 +12,7 @@ app = Flask(__name__)
 #api=Api(app)
 
 det_model = tf.saved_model.load('01_object_detection/model/saved_model')
-kpt_model = load_learner('./02_kpt_detection/pet_kpt_final.pkl')
+kpt_model = load_learner('./02_kpt_detection/pet_kpt.pkl')
 
 logging.debug('loaded models')
 
