@@ -1,7 +1,7 @@
 from flask import Flask, redirect, request, jsonify
 # from flask_restful import Api
 from fastai.learner import load_learner
-from kpt_utils import _resnet_split, ClampBatch, get_y, get_ip, sep_points, img2kpts
+from kpt_utils import ClampBatch,_resnet_split, ClampBatch, get_y, get_ip, sep_points, img2kpts
 import numpy as np
 import logging
 import tensorflow as tf
@@ -10,7 +10,6 @@ from PIL import Image
 logging.basicConfig(level=logging.DEBUG)
 app = Flask(__name__)
 #api=Api(app)
-
 
 det_model = tf.saved_model.load('01_object_detection/model/saved_model')
 kpt_model = load_learner('./02_kpt_detection/pet_kpt_final.pkl')
@@ -73,4 +72,5 @@ def predict():
 
 
 if __name__ == '__main__':
+    from kpt_utils import ClampBatch, _resnet_split, ClampBatch, get_y, get_ip, sep_points, img2kpts
     app.run(debug=True)
