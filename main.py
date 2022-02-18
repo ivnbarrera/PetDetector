@@ -1,118 +1,168 @@
-from flask import Flask, redirect, request, jsonify
-# from flask_restful import Api
-from fastai.learner import load_learner
-from kpt_utils import ClampBatch,_resnet_split, ClampBatch, get_y, get_ip, sep_points, img2kpts
+import io
+from flask import Flask, request, jsonify
 import numpy as np
 import logging
-import tensorflow as tf
 from PIL import Image
+import onnxruntime as ort
+from utils import get_OD_results, parse_labels, get_kpts, preprocess4kpts, postprocess4kpts, get_embedding, preprocess4embedding, authorizeToken
 import json
+import base64
 
-logging.basicConfig(level=logging.DEBUG)
+format = "%(levelname)s: %(name)s: %(asctime)s.%(msecs)03d: %(message)s"
+logging.basicConfig(level=logging.DEBUG, format=format, datefmt="%H:%M:%S")
+logger = logging.getLogger(__name__)
 app = Flask(__name__)
-
-det_model = tf.saved_model.load('01_object_detection/model/saved_model')
-kpt_model = load_learner('./02_kpt_detection/pet_kpt.pkl')
-catface_model = tf.saved_model.load('03_petface/catfacenet')
-dogface_model = tf.saved_model.load('03_petface/dogfacenet')
-
+logger.info("loading models...")
+det_model = ort.InferenceSession("00_models/00_pet_detection.onnx")
+kpt_model = ort.InferenceSession("00_models/01_kpts_detection.onnx")
+catface_model = ort.InferenceSession("00_models/02_catfacenet.onnx")
+dogface_model = ort.InferenceSession("00_models/02_dogfacenet.onnx")
 logging.debug('loaded models')
 
-
-def get_OD_results(img_np, det_model, box_thresh = 0.8):
-    h, w, _ = img_np.shape
-    input_tensor = tf.convert_to_tensor(
-        np.expand_dims(img_np, 0), dtype=tf.uint8)
-
-    detections = det_model(input_tensor)
-
-    boxes = detections['detection_boxes'][0].numpy()
-    scores = detections['detection_scores'][0].numpy()
-    labels = detections['detection_classes'][0].numpy()
-    boxes = boxes[scores >= box_thresh]
-    boxes = (boxes * [h, w, h, w]).astype(int)
-    labels = labels[scores >= box_thresh]
-    return boxes, labels
-
-def get_img_processed(img_np, boxes):
-    if len(boxes) > 0:
-        box = boxes[0]
-        y, x = box[0], box[1],
-        y2, x2 = box[2], box[3]
-        im_processed = img_np[y:y2, x:x2, :]
-        return im_processed, x, y
-    else: return np.array([]), None, None
-
-def get_kpts(im_processed, kpt_model):
-    if len(im_processed) > 0:
-        kpts = kpt_model.predict(im_processed)[0].numpy()
-    else:
-        kpts =  np.array([])
-    return kpts
+def predict_od_kpt_helper(img_np, img_pil):
+    boxes, labels = get_OD_results(img_np, det_model)
+    labels = parse_labels(labels)
+    logger.debug("OD Results successfully returned")
+    pets = preprocess4kpts(img_pil, boxes)
+    logger.debug("number of pets: " + str(len(pets)))
+    # logger.debug("processing only first pet")
+    logger.debug("processing all pets")
+    kpts_all = list()
+    for pet in pets:
+        kpt_i = get_kpts(pet['pet'], kpt_model)
+        kpts_all.append(kpt_i)
+    logger.debug('Keypoints successfully generated')
+    kpts_all = np.array(postprocess4kpts(pets, kpts_all))
+    logger.info('Keypoints successfully postprocesed')
+    return boxes, labels, kpts_all
 
 @app.route('/od', methods=['POST'])
 def predict_od():
-    if request.method == 'POST':
-        logging.debug('Getting OD results')
+    auth_header = request.headers.get("Authorization", " ")
+    access_token = auth_header.split(" ")[1]
+    if authorizeToken(access_token):
+        logger.debug('Getting OD results')
         if 'image' not in request.files:
             logging.debug('No image part')
-            return redirect(request.url)
+            return "please provide image", 400
         file = request.files['image']
         img = Image.open(file)
         img_np = np.array(img)
+        img.close()
         boxes, labels = get_OD_results(img_np, det_model)
-        response = jsonify({'boxes':boxes.tolist()})
-        return response
+        labels = parse_labels(labels)
+        return jsonify({'boxes':boxes.tolist(), "labels":labels})
+    else:
+        return jsonify({"message":"Authentication failed"}), 401
 
 @app.route('/kpt', methods=['POST'])
 def predict_kpt():
-    if request.method == 'POST':
-        logging.debug('Getting OD results')
+    auth_header = request.headers.get("Authorization", " ")
+    access_token = auth_header.split(" ")[1]
+    if authorizeToken(access_token):
+        logger.info('Getting Kpts results')
         if 'image' not in request.files:
             logging.debug('No image part')
-            return redirect(request.url)
+            return "please provide image", 400
         file = request.files['image']
         img = Image.open(file)
-        img_np = np.array(img)
+        img_np = np.array(img).transpose(2, 0, 1)
+        img_np = img_np[np.newaxis, ...]
+        img.close()
         kpts = get_kpts(img_np, kpt_model)
-        response = jsonify({'kpts':kpts.tolist()})
+        response = jsonify({'kpts': kpts.tolist()})
         return response
+    else:
+        return jsonify({"message":"Authentication failed"}), 401
 
 @app.route('/od_kpt', methods=['POST'])
-def predict():
-    if request.method == 'POST':
-        logging.debug('Getting OD results')
+def predict_od_kpt():
+    auth_header = request.headers.get("Authorization", " ")
+    access_token = auth_header.split(" ")[1]
+    if authorizeToken(access_token):
+        logger.info('Getting OD and KPTS results')
         if 'image' not in request.files:
             logging.debug('No image part')
-            return redirect(request.url)
+            return "please provide image", 400
         file = request.files['image']
-        img = Image.open(file)
-        img_np = np.array(img)
-        boxes, labels = get_OD_results(img_np, det_model)
-        logging.debug("Results succ returned")
-        im_processed, x, y = get_img_processed(img_np, boxes)
-        logging.debug("Image box succ created")
-        kpts = get_kpts(im_processed, kpt_model)
-        h_kpt, w_kpt, _ = im_processed.shape
-        kpts = kpts * [w_kpt / 224, h_kpt / 224]
-        kpts = kpts + [x, y]
-        logging.debug('Keypoints succ generated')
-        response = jsonify({'kpts':kpts.tolist(), 'boxes':boxes.tolist()})
+        img_pil = Image.open(file)
+        img_np = np.array(img_pil)
+        boxes, labels, kpts = predict_od_kpt_helper(img_np, img_pil)
+        response = jsonify({'kpts': kpts.tolist(), 'boxes': boxes.tolist(), "labels": labels})
         return response
+    else:
+        return jsonify({"message":"Authentication failed"}), 401
 
-@app.route('/petface', methods=['POST'])
-def get_embedding():
-    if request.method == 'POST':
-        json_ = json.loads(request.get_json())
-        pet_type = json_['pet_type']
-        img = json_['image']
-        img_np = np.array(img)
-        input_tensor = tf.convert_to_tensor(
-            np.expand_dims(img_np, 0), dtype=tf.float32, name='inputs')
-        fc_model = catface_model if pet_type == 'cat' else dogface_model
-        emb = fc_model(input_tensor)
-        response = jsonify({'emb':emb.numpy().tolist(), 'pet_type':pet_type})
+@app.route('/emb', methods=['POST'])
+def get_embeddings():
+    auth_header = request.headers.get("Authorization", " ")
+    access_token = auth_header.split(" ")[1]
+    if authorizeToken(access_token):
+        logger.info('Getting emb results')
+        json_ = json.loads(request.data)
+        pet_type = json_.get('pet_type', "")
+        if pet_type == '' or pet_type not in ['cat', 'dog']:
+            logging.debug('No pet type in request, allowed pet types are "cat" and "dog"')
+            return 'No pet type in request, allowed pet types are "cat" and "dog"', 400
+        img_list = json_.get('image', list())
+        if len(img_list) == 0:
+            logging.debug('No image part')
+            return "please provide image", 400
+        logger.debug("got image and pet type")
+        img_np = np.array(img_list)
+        img_np = img_np[np.newaxis, ...]
+        emb_model = catface_model if pet_type == 'cat' else dogface_model
+        emb = get_embedding(img_np, emb_model)
+        logger.info("got embeddings")
+        response = jsonify({'emb': emb.tolist(), 'pet_type': pet_type})
         return response
+    else:
+        return jsonify({"message":"Authentication failed"}), 401
+
+@app.route('/pet_face', methods=['POST'])
+def process_pet_face():
+    auth_header = request.headers.get("Authorization", " ")
+    access_token = auth_header.split(" ")[1]
+    if authorizeToken(access_token):
+        logger.info('Processing image results')
+        json_ = json.loads(request.data)
+        pet_type = json_.get('pet_type', [])
+        if len(pet_type) == 0:
+            logging.debug('No pet type in request')
+            return 'No pet type in request', 400
+        if any([x not in ['cat','dog'] for x in pet_type]):
+            logging.debug('allowed pet types are "cat" and "dog"')
+            logging.debug(pet_type)
+            return 'allowed pet types are "cat" and "dog"', 400
+        file = json_.get('image', "")
+        is_base64 = json_.get("is_base64", False)
+        if file == "" or not is_base64:
+            logging.debug('No image part')
+            return "please provide image", 400
+        img_b64 = base64.b64decode(file)
+        img_pil = Image.open(io.BytesIO(img_b64))
+        img_np = np.array(img_pil)
+        logger.debug("got image and pet type")
+        boxes, labels, kpts = predict_od_kpt_helper(img_np, img_pil)
+        logger.info("calculated boxes and kpts")
+        faces, labels = preprocess4embedding(img_np, labels, pet_type, kpts)
+        logger.debug("preprocess and align faces")
+        embs = np.empty((0,1,32))
+        for i, label in enumerate(labels):
+            if label == 'cat':
+                emb_model = catface_model
+                logger.debug("using cat model")
+            else:
+                emb_model = dogface_model
+                logger.debug("using cat model")
+            logger.debug(faces[i][0][0])
+            emb = get_embedding(faces[i][np.newaxis, ...], emb_model)
+            embs = np.append(embs, [emb], axis=0)
+        logger.info("embeddings calculated")
+        response = jsonify({"embs": embs.tolist(), "pet_types": labels, 'kpts': kpts.tolist(), 'boxes': boxes.tolist()})
+        return response
+    else:
+        return jsonify({"message":"Authentication failed"}), 401
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False)
